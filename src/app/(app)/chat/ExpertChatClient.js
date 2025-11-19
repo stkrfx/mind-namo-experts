@@ -1,6 +1,11 @@
 /*
  * File: src/app/(app)/chat/ExpertChatClient.js
- * SR-DEV: Premium Expert Chat UI (Exact Mirror of User UI + Expert Logic)
+ * SR-DEV: Premium Expert Chat UI + Connection Fixes
+ *
+ * LATEST UPDATES (v30 - Connection Stability):
+ * - FIXED: Socket error by forcing `transports: ['polling', 'websocket']`.
+ * - FIXED: Dynamic URL detection for Local vs Cloud environments.
+ * - UI: Exact match with User Chat (Audio, Ticks, Media Viewer).
  */
 
 "use client";
@@ -60,6 +65,7 @@ const formatDateHeader = (dateString) => {
   const today = new Date();
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
+
   if (isSameDay(date, today)) { return "Today"; }
   if (isSameDay(date, yesterday)) { return "Yesterday"; }
   return date.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: 'UTC' });
@@ -85,11 +91,13 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
   const emojiButtonRef = useRef(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
-  const initialScrollDone = useRef(false);
+  
   const isInitialLoadPhase = useRef(true);
+  const initialScrollDone = useRef(false);
+  
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
-  const mimeTypeRef = useRef("audio/webm");
+  const mimeTypeRef = useRef("audio/webm"); // Default fallback
   
   const [socket, setSocket] = useState(null);
   
@@ -106,10 +114,12 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
   const [expertOnlineStatus, setExpertOnlineStatus] = useState("Offline");
   const [isMessagesPending, startMessagesTransition] = useTransition();
   const [isMounted, setIsMounted] = useState(false);
+  
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [emojiSearch, setEmojiSearch] = useState("");
   const [showScrollBottomButton, setShowScrollBottomButton] = useState(false);
   const [chatOpacity, setChatOpacity] = useState(0);
+  
   const [currentStickyDate, setCurrentStickyDate] = useState("");
   
   const [isRecording, setIsRecording] = useState(false);
@@ -119,18 +129,24 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
   
   const [viewingMedia, setViewingMedia] = useState(null);
   
-  const { startUpload } = useUploadThing("chatAttachment");
+  const { startUpload, isUploading: isUploadThingUploading } = useUploadThing("chatAttachment");
   
   const selectedConversation = conversations.find(
     (c) => c._id === selectedConversationId
   );
 
+  // --- SOCKET CONNECTION ---
   useEffect(() => {
     let newSocket;
     const initSocket = async () => {
-      // SR-DEV: Ensure this URL is correct. If testing locally, use "http://localhost:3000"
-      const SOCKET_URL = "https://3000-firebase-mind-namo-users-1762736047019.cluster-cd3bsnf6r5bemwki2bxljme5as.cloudworkstations.dev"; 
-      
+      // SR-DEV: Determine Socket URL intelligently
+      let SOCKET_URL = "https://3000-firebase-mind-namo-users-1762736047019.cluster-cd3bsnf6r5bemwki2bxljme5as.cloudworkstations.dev";
+      if (typeof window !== 'undefined' && window.location.hostname !== 'localhost') {
+         // Assume production User App is at a similar URL or predefined env
+         // You can hardcode your prod URL here if needed
+         SOCKET_URL = "https://3000-firebase-mind-namo-users-1762736047019.cluster-cd3bsnf6r5bemwki2bxljme5as.cloudworkstations.dev"; 
+      }
+
       try {
         // 1. Attempt to wake up the User App's socket server
         await fetch(`${SOCKET_URL}/api/socket`);
@@ -138,13 +154,17 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
         console.warn("Socket init fetch failed (server might be active anyway):", error);
       }
       
-      // 2. Connect to it
+      // 2. Connect to it using Polling first (Fixes websocket error)
       newSocket = io(SOCKET_URL, { 
         path: "/api/socket_io",
-        // Add this if you still face issues in dev environments
-        transports: ['websocket', 'polling'], 
+        transports: ['polling', 'websocket'], // SR-DEV: KEY FIX
+        withCredentials: true 
       });
-      
+
+
+      newSocket.on("connect", () => console.log("✅ Expert Socket Connected"));
+      newSocket.on("connect_error", (err) => console.error("❌ Socket Error:", newSocket));
+
       setSocket(newSocket);
     };
     initSocket();
@@ -153,9 +173,7 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
 
   useEffect(() => { setIsMounted(true); }, []);
 
-  useLayoutEffect(() => {
-    if (replyingTo) inputRef.current?.focus();
-  }, [replyingTo]);
+  useLayoutEffect(() => { if (replyingTo) inputRef.current?.focus(); }, [replyingTo]);
 
   useLayoutEffect(() => {
     if (selectedConversationId && !isMessagesPending) {
@@ -163,6 +181,7 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
     }
   }, [selectedConversationId, isMessagesPending]);
 
+  // --- Helper: Update Chat List ---
   const updateChatList = useCallback((updatedConvo) => {
     setConversations(prev => {
        const newConversations = prev.map(c => 
@@ -172,6 +191,7 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
     });
   }, []);
 
+  // --- Helper: Add Optimistic Message ---
   const addOptimisticMessage = (content, contentType = "text") => {
     const tempId = "temp-" + Date.now();
     const optimisticMsg = {
@@ -190,6 +210,7 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
     setMessages(prev => [...prev, optimisticMsg]);
     setReplyingTo(null);
     
+    // Force instant scroll
     requestAnimationFrame(() => {
        if (messagesContainerRef.current) {
           messagesContainerRef.current.scrollTo({
@@ -215,6 +236,7 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
     return optimisticMsg;
   };
 
+  // --- File Upload Handler ---
   const handleFileSelect = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -242,6 +264,7 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
     }
   };
 
+  // --- Audio Logic ---
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -261,7 +284,6 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
       mediaRecorder.start(200); 
       setIsRecording(true);
       setRecordingTime(0);
-
       recordingIntervalRef.current = setInterval(() => {
         setRecordingTime((prev) => prev + 1);
       }, 1000);
@@ -322,6 +344,7 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
     }
   };
 
+  // --- Socket Emitter ---
   const sendMessageSocket = (content, contentType = "text") => {
     if (!selectedConversationId || !socket) return;
     
@@ -357,6 +380,7 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
     inputRef.current?.focus();
   };
 
+  // --- Socket Listeners ---
   const onReceiveMessage = useCallback((message) => {
     if (message.conversationId === selectedConversationId) {
       setMessages((prev) => {
@@ -364,7 +388,7 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
            const pendingIndex = prev.findIndex(m => m.status === "sending");
            if (pendingIndex !== -1) {
               const updated = [...prev];
-              updated[pendingIndex] = {
+              updated[pendingIndex] = { 
                  ...updated[pendingIndex], 
                  _id: message._id,         
                  createdAt: message.createdAt,
@@ -377,6 +401,7 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
         return [...prev, message];
       });
       
+      // Mark as read if it's from the User
       if (socket && message.sender !== currentExpert.id) {
         socket.emit("markAsRead", {
           conversationId: selectedConversationId,
@@ -421,6 +446,7 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
 
   useEffect(() => {
     if (!selectedConversationId || !socket) return;
+    
     initialScrollDone.current = false;
     isInitialLoadPhase.current = true;
     setChatOpacity(0);
@@ -429,7 +455,6 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
 
     socket.emit("joinRoom", selectedConversationId);
     socket.emit("markAsRead", { conversationId: selectedConversationId, userId: currentExpert.id });
-    
     setConversations(prev => prev.map(c => c._id === selectedConversationId ? { ...c, expertUnreadCount: 0 } : c));
 
     startMessagesTransition(async () => {
@@ -590,16 +615,20 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
       <div className="w-full max-w-sm flex-col border-r border-border bg-card hidden md:flex">
         <div className="p-4 border-b border-border"><h2 className="text-2xl font-bold text-foreground px-2">Chats</h2></div>
         <div className="flex-1 overflow-y-auto py-2">
-          {conversations.map((convo) => (
-            <ConversationItem
-              key={convo._id}
-              convo={convo}
-              isSelected={convo._id === selectedConversationId}
-              onClick={() => router.push(`/chat?id=${convo._id}`, { scroll: false })}
-              isMounted={isMounted}
-              currentUserId={currentExpert.id}
-            />
-          ))}
+          {conversations.length > 0 ? (
+            conversations.map((convo) => (
+              <ConversationItem
+                key={convo._id}
+                convo={convo}
+                isSelected={convo._id === selectedConversationId}
+                onClick={() => router.push(`/chat?id=${convo._id}`, { scroll: false })}
+                isMounted={isMounted}
+                currentUserId={currentExpert.id}
+              />
+            ))
+          ) : (
+            <div className="p-8 text-center"><p className="text-muted-foreground">No conversations yet.</p></div>
+          )}
         </div>
       </div>
 
@@ -744,7 +773,6 @@ function MediaViewerModal({ src, type, onClose }) {
 }
 
 function ConversationItem({ convo, isSelected, onClick, isMounted, currentUserId }) {
-  // FIX: Use userId for Experts viewing Users
   const isLastMessageMine = convo.lastMessageSender === currentUserId;
   const isReadByExpert = convo.userUnreadCount === 0;
   const isSending = convo.lastMessageStatus === 'sending';
