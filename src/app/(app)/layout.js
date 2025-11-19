@@ -1,17 +1,19 @@
 /*
  * File: src/app/(app)/layout.js
- * SR-DEV: This is the "best-in-class" layout for the
- * protected part of the expert app. It will
- * contain the expert-specific header/nav.
+ * SR-DEV: Expert App Layout (Smart Layout)
+ * * UPDATES:
+ * - FIXED: Detects "/chat" route to remove padding and disable page-level scrolling.
+ * - FIXED: Ensures Chat UI takes up 100% height without double scrollbars.
  */
 
-"use client"; // This must be client for the hooks
+"use client";
 
 import Link from "next/link";
 import { useSession, signOut } from "next-auth/react";
 import { Button } from "@/components/ui/button";
-import ProfileImage from "@/components/ProfileImage"; // Re-using our component
+import ProfileImage from "@/components/ProfileImage"; 
 import { cn } from "@/lib/utils";
+import { usePathname } from "next/navigation"; 
 
 // --- Icons ---
 const LayoutDashboardIcon = (props) => (
@@ -23,19 +25,28 @@ const SettingsIcon = (props) => (
 const LogOutIcon = (props) => (
   <svg {...props} xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" x2="9" y1="12" y2="12" /></svg>
 );
+const MessageIcon = (props) => (
+  <svg {...props} xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+);
 // ---
 
 const navLinks = [
   { name: "Dashboard", href: "/", icon: <LayoutDashboardIcon /> },
+  { name: "Chat", href: "/chat", icon: <MessageIcon /> },
   { name: "Settings", href: "/settings", icon: <SettingsIcon /> },
 ];
 
 export default function AppLayout({ children }) {
   const { data: session, status } = useSession();
+  const pathname = usePathname();
+  
+  // SR-DEV: Check if we are on the chat page
+  const isChatPage = pathname?.startsWith("/chat");
 
   return (
-    <div className="flex min-h-screen w-full flex-col">
-      <header className="sticky top-0 z-50 flex h-16 items-center gap-4 border-b bg-white px-4 md:px-6 dark:bg-zinc-950 dark:border-zinc-800">
+    // SR-DEV: Use h-screen and overflow-hidden to prevent body scroll bars
+    <div className="flex h-screen w-full flex-col overflow-hidden bg-zinc-50 dark:bg-zinc-950">
+      <header className="sticky top-0 z-50 flex h-16 shrink-0 items-center gap-4 border-b bg-white px-4 md:px-6 dark:bg-zinc-950 dark:border-zinc-800">
         <nav className="hidden flex-col gap-6 text-lg font-medium md:flex md:flex-row md:items-center md:gap-5 md:text-sm lg:gap-6">
           <Link
             href="/"
@@ -55,21 +66,25 @@ export default function AppLayout({ children }) {
             </svg>
             <span>Mind Namo Experts</span>
           </Link>
-          {navLinks.map((link) => (
-            <Link
-              key={link.name}
-              href={link.href}
-              className="flex items-center gap-2 text-muted-foreground transition-colors hover:text-primary"
-            >
-              {link.icon}
-              {link.name}
-            </Link>
-          ))}
+          {navLinks.map((link) => {
+            const isActive = pathname === link.href || (link.href !== '/' && pathname.startsWith(link.href));
+            return (
+              <Link
+                key={link.name}
+                href={link.href}
+                className={cn(
+                  "flex items-center gap-2 transition-colors hover:text-primary",
+                  isActive ? "text-foreground font-medium" : "text-muted-foreground"
+                )}
+              >
+                {link.icon}
+                {link.name}
+              </Link>
+            );
+          })}
         </nav>
         <div className="flex w-full items-center gap-4 md:ml-auto md:gap-2 lg:gap-4">
-          <div className="ml-auto flex-1 sm:flex-initial">
-            {/* Spacer */}
-          </div>
+          <div className="ml-auto flex-1 sm:flex-initial"></div>
           {status === "authenticated" && session.user ? (
             <div className="relative">
               <ProfileImage
@@ -87,7 +102,17 @@ export default function AppLayout({ children }) {
           </Button>
         </div>
       </header>
-      <main className="flex flex-1 flex-col gap-4 p-4 md:gap-8 md:p-8 bg-zinc-50 dark:bg-zinc-950">
+      
+      {/* SR-DEV: THE FIX IS HERE
+        If Chat Page -> Remove padding, prevent scroll (Client handles it).
+        If Other Page -> Add padding, allow scroll (Standard web behavior).
+      */}
+      <main className={cn(
+        "flex flex-1 flex-col",
+        isChatPage 
+          ? "overflow-hidden p-0" // Full size, no padding for Chat
+          : "overflow-y-auto gap-4 p-4 md:gap-8 md:p-8" // Standard layout for Dashboard
+      )}>
         {children}
       </main>
     </div>
