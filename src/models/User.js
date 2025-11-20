@@ -76,6 +76,10 @@ const UserSchema = new mongoose.Schema(
       sparse: true,
       default: null,
     },
+
+    // SR-DEV: New fields for Online Status
+    isOnline: { type: Boolean, default: false },
+    lastSeen: { type: Date, default: Date.now },
   },
   {
     // SR-DEV: Explicitly setting the collection name is a best practice

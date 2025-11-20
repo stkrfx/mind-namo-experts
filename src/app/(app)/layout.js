@@ -1,9 +1,8 @@
 /*
  * File: src/app/(app)/layout.js
- * SR-DEV: Expert App Layout (Smart Layout)
- * * UPDATES:
- * - FIXED: Detects "/chat" route to remove padding and disable page-level scrolling.
- * - FIXED: Ensures Chat UI takes up 100% height without double scrollbars.
+ * SR-DEV: Expert App Layout
+ *
+ * FIX: Replaced 'h-screen' with 'h-[100dvh]' for mobile responsiveness.
  */
 
 "use client";
@@ -28,7 +27,6 @@ const LogOutIcon = (props) => (
 const MessageIcon = (props) => (
   <svg {...props} xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
 );
-// ---
 
 const navLinks = [
   { name: "Dashboard", href: "/", icon: <LayoutDashboardIcon /> },
@@ -40,12 +38,11 @@ export default function AppLayout({ children }) {
   const { data: session, status } = useSession();
   const pathname = usePathname();
   
-  // SR-DEV: Check if we are on the chat page
   const isChatPage = pathname?.startsWith("/chat");
 
   return (
-    // SR-DEV: Use h-screen and overflow-hidden to prevent body scroll bars
-    <div className="flex h-screen w-full flex-col overflow-hidden bg-zinc-50 dark:bg-zinc-950">
+    // SR-DEV: FIX - Use h-[100dvh] to handle mobile browser address bars correctly
+    <div className="flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-50 dark:bg-zinc-950">
       <header className="sticky top-0 z-50 flex h-16 shrink-0 items-center gap-4 border-b bg-white px-4 md:px-6 dark:bg-zinc-950 dark:border-zinc-800">
         <nav className="hidden flex-col gap-6 text-lg font-medium md:flex md:flex-row md:items-center md:gap-5 md:text-sm lg:gap-6">
           <Link
@@ -103,15 +100,11 @@ export default function AppLayout({ children }) {
         </div>
       </header>
       
-      {/* SR-DEV: THE FIX IS HERE
-        If Chat Page -> Remove padding, prevent scroll (Client handles it).
-        If Other Page -> Add padding, allow scroll (Standard web behavior).
-      */}
       <main className={cn(
         "flex flex-1 flex-col",
         isChatPage 
-          ? "overflow-hidden p-0" // Full size, no padding for Chat
-          : "overflow-y-auto gap-4 p-4 md:gap-8 md:p-8" // Standard layout for Dashboard
+          ? "overflow-hidden p-0" 
+          : "overflow-y-auto gap-4 p-4 md:gap-8 md:p-8" 
       )}>
         {children}
       </main>

@@ -244,6 +244,10 @@ const ExpertSchema = new mongoose.Schema(
       type: [AvailabilitySlotSchema],
       default: [],
     },
+
+    // SR-DEV: New fields for Online Status
+    isOnline: { type: Boolean, default: false },
+    lastSeen: { type: Date, default: Date.now },
   },
   {
     timestamps: true,

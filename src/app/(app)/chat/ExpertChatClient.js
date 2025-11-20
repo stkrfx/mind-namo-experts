@@ -1,11 +1,14 @@
 /*
  * File: src/app/(app)/chat/ExpertChatClient.js
- * SR-DEV: Premium Expert Chat UI + Connection Fixes
+ * SR-DEV: Premium Expert Chat UI - Final Production Version
  *
- * LATEST UPDATES (v30 - Connection Stability):
- * - FIXED: Socket error by forcing `transports: ['polling', 'websocket']`.
- * - FIXED: Dynamic URL detection for Local vs Cloud environments.
- * - UI: Exact match with User Chat (Audio, Ticks, Media Viewer).
+ * FEATURES:
+ * - Connects to User App Socket (CORS compatible).
+ * - WhatsApp-style Audio Recording & Playback.
+ * - Image/PDF Sharing via Uploadthing.
+ * - Optimistic UI (Instant Send & Scroll).
+ * - Typing Indicators & Online Status.
+ * - Zero-Flicker Image Loading.
  */
 
 "use client";
@@ -65,9 +68,8 @@ const formatDateHeader = (dateString) => {
   const today = new Date();
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
-
-  if (isSameDay(date, today)) { return "Today"; }
-  if (isSameDay(date, yesterday)) { return "Yesterday"; }
+  if (isSameDay(date, today)) return "Today";
+  if (isSameDay(date, yesterday)) return "Yesterday";
   return date.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: 'UTC' });
 };
 
@@ -76,9 +78,20 @@ const formatLastMessageTime = (dateString) => {
   const today = new Date();
   const yesterday = new Date(today);
   yesterday.setDate(yesterday.getDate() - 1);
-  if (isSameDay(date, today)) { return date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true }); }
-  if (isSameDay(date, yesterday)) { return "Yesterday"; }
+  if (isSameDay(date, today)) return date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
+  if (isSameDay(date, yesterday)) return "Yesterday";
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: 'UTC' });
+};
+
+const formatLastSeen = (dateString, isOnline) => {
+    if (isOnline) return "Online";
+    if (!dateString) return "";
+    const date = new Date(dateString);
+    const today = new Date();
+    if (isSameDay(date, today)) {
+        return `Last seen today at ${date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}`;
+    }
+    return `Last seen ${date.toLocaleDateString("en-US", { day: 'numeric', month: 'short' })} at ${date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })}`;
 };
 
 export default function ExpertChatClient({ initialConversations, currentExpert }) {
@@ -97,7 +110,8 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
   
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
-  const mimeTypeRef = useRef("audio/webm"); // Default fallback
+  const mimeTypeRef = useRef("audio/webm");
+  const typingTimeoutRef = useRef(null);
   
   const [socket, setSocket] = useState(null);
   
@@ -119,7 +133,6 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
   const [emojiSearch, setEmojiSearch] = useState("");
   const [showScrollBottomButton, setShowScrollBottomButton] = useState(false);
   const [chatOpacity, setChatOpacity] = useState(0);
-  
   const [currentStickyDate, setCurrentStickyDate] = useState("");
   
   const [isRecording, setIsRecording] = useState(false);
@@ -129,69 +142,89 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
   
   const [viewingMedia, setViewingMedia] = useState(null);
   
+  const [isTyping, setIsTyping] = useState(false); 
+  const [remoteStatus, setRemoteStatus] = useState({ isOnline: false, lastSeen: null });
+  
   const { startUpload, isUploading: isUploadThingUploading } = useUploadThing("chatAttachment");
   
   const selectedConversation = conversations.find(
     (c) => c._id === selectedConversationId
   );
 
+  // --- REMOTE STATUS SYNC ---
+  useEffect(() => {
+      const user = selectedConversation?.userId;
+      if (user) {
+          setRemoteStatus(prev => {
+              if (prev.isOnline === user.isOnline && prev.lastSeen === user.lastSeen) return prev;
+              return { isOnline: user.isOnline, lastSeen: user.lastSeen };
+          });
+      }
+  }, [selectedConversationId, selectedConversation?.userId?.isOnline, selectedConversation?.userId?.lastSeen]);
+
   // --- SOCKET CONNECTION ---
   useEffect(() => {
     let newSocket;
     const initSocket = async () => {
-      // SR-DEV: Determine Socket URL intelligently
-      let SOCKET_URL = "https://3000-firebase-mind-namo-users-1762736047019.cluster-cd3bsnf6r5bemwki2bxljme5as.cloudworkstations.dev";
-      if (typeof window !== 'undefined' && window.location.hostname !== 'localhost') {
-         // Assume production User App is at a similar URL or predefined env
-         // You can hardcode your prod URL here if needed
-         SOCKET_URL = "https://3000-firebase-mind-namo-users-1762736047019.cluster-cd3bsnf6r5bemwki2bxljme5as.cloudworkstations.dev"; 
-      }
+      // ⚠️ REPLACE with your Cloud URL if deployed, otherwise localhost
+      const SOCKET_URL = process.env.NEXT_PUBLIC_USER_APP_URL || "https://3000-firebase-mind-namo-users-1762736047019.cluster-cd3bsnf6r5bemwki2bxljme5as.cloudworkstations.dev"; 
 
-      try {
-        // 1. Attempt to wake up the User App's socket server
-        await fetch(`${SOCKET_URL}/api/socket`);
-      } catch (error) {
-        console.warn("Socket init fetch failed (server might be active anyway):", error);
-      }
-      
-      // 2. Connect to it using Polling first (Fixes websocket error)
+      try { await fetch(`${SOCKET_URL}/api/socket`); } catch (e) {}
+
       newSocket = io(SOCKET_URL, { 
-        path: "/api/socket_io",
-        transports: ['polling', 'websocket'], // SR-DEV: KEY FIX
-        withCredentials: true 
+          path: "/api/socket_io",
+          query: { userId: currentExpert.id, model: "Expert" },
+          transports: ["polling", "websocket"], // Fallback enabled for stability
+          withCredentials: true 
       });
 
-
       newSocket.on("connect", () => console.log("✅ Expert Socket Connected"));
-      newSocket.on("connect_error", (err) => console.error("❌ Socket Error:", newSocket));
+      newSocket.on("connect_error", (err) => console.warn("Socket connection warning:", err.message));
 
       setSocket(newSocket);
     };
     initSocket();
     return () => { if (newSocket) newSocket.disconnect(); };
-  }, []);
+  }, [currentExpert.id]);
 
   useEffect(() => { setIsMounted(true); }, []);
-
   useLayoutEffect(() => { if (replyingTo) inputRef.current?.focus(); }, [replyingTo]);
+  useLayoutEffect(() => { if (selectedConversationId && !isMessagesPending) inputRef.current?.focus(); }, [selectedConversationId, isMessagesPending]);
 
-  useLayoutEffect(() => {
-    if (selectedConversationId && !isMessagesPending) {
-      inputRef.current?.focus();
-    }
-  }, [selectedConversationId, isMessagesPending]);
-
-  // --- Helper: Update Chat List ---
   const updateChatList = useCallback((updatedConvo) => {
     setConversations(prev => {
-       const newConversations = prev.map(c => 
-         c._id === updatedConvo.conversationId ? { ...c, ...updatedConvo } : c
-       );
+       const newConversations = prev.map(c => c._id === updatedConvo.conversationId ? { ...c, ...updatedConvo } : c);
        return newConversations.sort((a, b) => new Date(b.lastMessageAt) - new Date(a.lastMessageAt));
     });
   }, []);
 
-  // --- Helper: Add Optimistic Message ---
+  const handleTyping = (e) => {
+      setNewMessage(e.target.value);
+      if (!socket || !selectedConversationId) return;
+      socket.emit("typing", { conversationId: selectedConversationId, typerId: currentExpert.id });
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = setTimeout(() => {
+          socket.emit("stopTyping", { conversationId: selectedConversationId, typerId: currentExpert.id });
+      }, 2000);
+  };
+
+  // --- EVENT HANDLERS ---
+  const onUserStatusChanged = useCallback(({ userId, isOnline, lastSeen }) => {
+      if (selectedConversation?.userId?._id === userId) {
+          setRemoteStatus(prev => ({ ...prev, isOnline, lastSeen: lastSeen || prev.lastSeen }));
+      }
+  }, [selectedConversation]);
+
+  const onTyping = useCallback(({ conversationId, typerId }) => {
+      if (conversationId === selectedConversationId && typerId !== currentExpert.id) setIsTyping(true);
+      setConversations(prev => prev.map(c => c._id === conversationId ? { ...c, isTyping: true } : c));
+  }, [selectedConversationId, currentExpert.id]);
+
+  const onStopTyping = useCallback(({ conversationId, typerId }) => {
+      if (conversationId === selectedConversationId && typerId !== currentExpert.id) setIsTyping(false);
+      setConversations(prev => prev.map(c => c._id === conversationId ? { ...c, isTyping: false } : c));
+  }, [selectedConversationId, currentExpert.id]);
+
   const addOptimisticMessage = (content, contentType = "text") => {
     const tempId = "temp-" + Date.now();
     const optimisticMsg = {
@@ -206,181 +239,56 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
       readBy: [currentExpert.id],
       status: "sending" 
     };
-
     setMessages(prev => [...prev, optimisticMsg]);
     setReplyingTo(null);
-    
-    // Force instant scroll
     requestAnimationFrame(() => {
        if (messagesContainerRef.current) {
-          messagesContainerRef.current.scrollTo({
-              top: messagesContainerRef.current.scrollHeight + 10000,
-              behavior: "auto"
-          });
+          messagesContainerRef.current.scrollTo({ top: messagesContainerRef.current.scrollHeight + 10000, behavior: "auto" });
        }
     });
-
     let previewText = content;
     if (contentType === 'audio') previewText = "🎤 Sending Audio...";
     else if (contentType === 'image') previewText = "📷 Sending Image...";
     else if (contentType === 'pdf') previewText = "📄 Sending File...";
-
-    updateChatList({
-        conversationId: selectedConversationId,
-        lastMessage: previewText,
-        lastMessageAt: new Date().toISOString(),
-        lastMessageSender: currentExpert.id,
-        lastMessageStatus: "sending"
-    });
-    
+    updateChatList({ conversationId: selectedConversationId, lastMessage: previewText, lastMessageAt: new Date().toISOString(), lastMessageSender: currentExpert.id, lastMessageStatus: "sending" });
     return optimisticMsg;
   };
 
-  // --- File Upload Handler ---
   const handleFileSelect = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    
     let contentType = "text";
     if (file.type.startsWith("image/")) contentType = "image";
     else if (file.type === "application/pdf") contentType = "pdf";
-    else {
-      alert("Only images and PDFs are supported.");
-      return;
-    }
-
+    else { alert("Only images and PDFs are supported."); return; }
     const blobUrl = URL.createObjectURL(file);
     addOptimisticMessage(blobUrl, contentType);
-
-    try {
-      const res = await startUpload([file]);
-      if (res && res[0]) {
-        sendMessageSocket(res[0].url, contentType);
-      }
-    } catch (error) {
-      console.error("File upload failed:", error);
-    } finally {
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
+    try { const res = await startUpload([file]); if (res && res[0]) { sendMessageSocket(res[0].url, contentType); } } catch (error) { console.error("File upload failed:", error); } finally { if (fileInputRef.current) fileInputRef.current.value = ""; }
   };
 
-  // --- Audio Logic ---
   const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      let mimeType = "audio/webm";
-      if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) mimeType = "audio/webm;codecs=opus";
-      else if (MediaRecorder.isTypeSupported("audio/mp4")) mimeType = "audio/mp4";
-      
-      mimeTypeRef.current = mimeType;
-      const mediaRecorder = new MediaRecorder(stream, { mimeType });
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) audioChunksRef.current.push(event.data);
-      };
-
-      mediaRecorder.start(200); 
-      setIsRecording(true);
-      setRecordingTime(0);
-      recordingIntervalRef.current = setInterval(() => {
-        setRecordingTime((prev) => prev + 1);
-      }, 1000);
-    } catch (error) {
-      console.error("Error accessing microphone:", error);
-      alert("Could not access microphone.");
-    }
+    try { const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); let mimeType = "audio/webm"; if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) mimeType = "audio/webm;codecs=opus"; else if (MediaRecorder.isTypeSupported("audio/mp4")) mimeType = "audio/mp4"; mimeTypeRef.current = mimeType; const mediaRecorder = new MediaRecorder(stream, { mimeType }); mediaRecorderRef.current = mediaRecorder; audioChunksRef.current = []; mediaRecorder.ondataavailable = (event) => { if (event.data.size > 0) audioChunksRef.current.push(event.data); }; mediaRecorder.start(100); setIsRecording(true); setRecordingTime(0); recordingIntervalRef.current = setInterval(() => { setRecordingTime((prev) => prev + 1); }, 1000); } catch (error) { console.error("Error accessing microphone:", error); alert("Could not access microphone."); }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setTimeout(async () => {
-        const mimeType = mimeTypeRef.current;
-        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
-        
-        if (audioBlob.size === 0) {
-            alert("Recording failed: Empty audio.");
-            setIsRecording(false);
-            clearInterval(recordingIntervalRef.current);
-            return;
-        }
-
-        const ext = mimeType.includes("mp4") ? "m4a" : "webm";
-        const audioFile = new File([audioBlob], `voice-message.${ext}`, { type: mimeType });
-
-        setIsRecording(false);
-        clearInterval(recordingIntervalRef.current);
-
-        const blobUrl = URL.createObjectURL(audioBlob);
-        addOptimisticMessage(blobUrl, "audio");
-
-        try {
-          const res = await startUpload([audioFile]);
-          if (res && res[0]) {
-             sendMessageSocket(res[0].url, "audio");
-          }
-        } catch (error) {
-          console.error("Upload error:", error);
-        }
-        
-        if (mediaRecorderRef.current?.stream) {
-             mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
-        }
-      }, 200); 
-    }
+    if (mediaRecorderRef.current && isRecording) { mediaRecorderRef.current.stop(); setTimeout(async () => { const mimeType = mimeTypeRef.current; const audioBlob = new Blob(audioChunksRef.current, { type: mimeType }); if (audioBlob.size === 0) { alert("Recording failed: Empty audio."); setIsRecording(false); clearInterval(recordingIntervalRef.current); return; } const ext = mimeType.includes("mp4") ? "m4a" : "webm"; const audioFile = new File([audioBlob], `voice-message.${ext}`, { type: mimeType }); setIsRecording(false); clearInterval(recordingIntervalRef.current); const blobUrl = URL.createObjectURL(audioBlob); addOptimisticMessage(blobUrl, "audio"); try { const res = await startUpload([audioFile]); if (res && res[0]) { sendMessageSocket(res[0].url, "audio"); } } catch (error) { console.error("Upload error:", error); } if (mediaRecorderRef.current?.stream) { mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop()); } }, 200); }
   };
 
-  const cancelRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      if (mediaRecorderRef.current.stream) {
-         mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
-      }
-      setIsRecording(false);
-      clearInterval(recordingIntervalRef.current);
-      setRecordingTime(0);
-    }
-  };
+  const cancelRecording = () => { if (mediaRecorderRef.current && isRecording) { mediaRecorderRef.current.stop(); if (mediaRecorderRef.current.stream) { mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop()); } setIsRecording(false); clearInterval(recordingIntervalRef.current); setRecordingTime(0); } };
 
-  // --- Socket Emitter ---
   const sendMessageSocket = (content, contentType = "text") => {
     if (!selectedConversationId || !socket) return;
-    
-    socket.emit("sendMessage", {
-      conversationId: selectedConversationId,
-      sender: currentExpert.id,
-      senderModel: "Expert",
-      content: content,
-      contentType: contentType,
-      replyTo: replyingTo ? replyingTo._id : null,
-    });
-
+    socket.emit("sendMessage", { conversationId: selectedConversationId, sender: currentExpert.id, senderModel: "Expert", content: content, contentType: contentType, replyTo: replyingTo ? replyingTo._id : null });
     let previewText = content;
     if (contentType === 'audio') previewText = "🎤 Audio Message";
     else if (contentType === 'image') previewText = "📷 Image";
     else if (contentType === 'pdf') previewText = "📄 Document";
-
-    updateChatList({
-        conversationId: selectedConversationId,
-        lastMessage: previewText,
-        lastMessageAt: new Date().toISOString(),
-        lastMessageSender: currentExpert.id,
-        lastMessageStatus: "sent"
-    });
+    updateChatList({ conversationId: selectedConversationId, lastMessage: previewText, lastMessageAt: new Date().toISOString(), lastMessageSender: currentExpert.id, lastMessageStatus: "sent" });
   };
 
-  const handleSendMessage = (e) => {
-    e.preventDefault();
-    if (!newMessage.trim()) return;
-    addOptimisticMessage(newMessage, "text");
-    sendMessageSocket(newMessage, "text");
-    setNewMessage("");
-    inputRef.current?.focus();
-  };
+  const handleSendMessage = (e) => { e.preventDefault(); if (!newMessage.trim()) return; addOptimisticMessage(newMessage, "text"); sendMessageSocket(newMessage, "text"); setNewMessage(""); inputRef.current?.focus(); };
+  const handleDeleteMessage = (messageId) => { if (!socket) return; socket.emit("deleteMessage", { conversationId: selectedConversationId, messageId }); setMessages(prev => prev.filter(m => m._id !== messageId)); setDeleteConfirmId(null); };
 
-  // --- Socket Listeners ---
   const onReceiveMessage = useCallback((message) => {
     if (message.conversationId === selectedConversationId) {
       setMessages((prev) => {
@@ -388,527 +296,131 @@ export default function ExpertChatClient({ initialConversations, currentExpert }
            const pendingIndex = prev.findIndex(m => m.status === "sending");
            if (pendingIndex !== -1) {
               const updated = [...prev];
-              updated[pendingIndex] = { 
-                 ...updated[pendingIndex], 
-                 _id: message._id,         
-                 createdAt: message.createdAt,
-                 status: 'sent',           
-                 readBy: message.readBy,
-              };
+              updated[pendingIndex] = { ...updated[pendingIndex], _id: message._id, createdAt: message.createdAt, status: 'sent', readBy: message.readBy };
               return updated;
            }
         }
         return [...prev, message];
       });
-      
-      // Mark as read if it's from the User
-      if (socket && message.sender !== currentExpert.id) {
-        socket.emit("markAsRead", {
-          conversationId: selectedConversationId,
-          userId: currentExpert.id,
-        });
-      }
+      if (socket && message.sender !== currentExpert.id) { socket.emit("markAsRead", { conversationId: selectedConversationId, userId: currentExpert.id }); }
     }
-    
     let previewText = message.content;
-    if (message.contentType === 'audio') previewText = "🎤 Audio Message";
-    else if (message.contentType === 'image') previewText = "📷 Image";
-    else if (message.contentType === 'pdf') previewText = "📄 Document";
-
-    updateChatList({
-        conversationId: message.conversationId,
-        lastMessage: previewText,
-        lastMessageAt: message.createdAt,
-        lastMessageStatus: "sent"
-    });
+    if (message.contentType === 'audio') previewText = "🎤 Audio Message"; else if (message.contentType === 'image') previewText = "📷 Image"; else if (message.contentType === 'pdf') previewText = "📄 Document";
+    updateChatList({ conversationId: message.conversationId, lastMessage: previewText, lastMessageAt: message.createdAt, lastMessageStatus: "sent" });
   }, [selectedConversationId, currentExpert.id, socket, updateChatList]);
 
-  const onMessagesRead = useCallback(({ conversationId, readByUserId }) => {
-    if (conversationId === selectedConversationId) {
-      setMessages((prev) => 
-        prev.map(msg => {
-          if (msg.sender === currentExpert.id && !msg.readBy.includes(readByUserId)) {
-            return { ...msg, readBy: [...msg.readBy, readByUserId] };
-          }
-          return msg;
-        })
-      );
-    }
-  }, [selectedConversationId, currentExpert.id]);
+  const onMessagesRead = useCallback(({ conversationId, readByUserId }) => { if (conversationId === selectedConversationId) { setMessages((prev) => prev.map(msg => { if (msg.sender === currentExpert.id && !msg.readBy.includes(readByUserId)) { return { ...msg, readBy: [...msg.readBy, readByUserId] }; } return msg; })); } }, [selectedConversationId, currentExpert.id]);
+  const onMessageDeleted = useCallback(({ messageId }) => { setMessages((prev) => prev.filter((msg) => msg._id !== messageId)); }, []);
+  const onConversationUpdated = useCallback((updatedConvo) => { updateChatList(updatedConvo); }, [updateChatList]);
 
-  const onMessageDeleted = useCallback(({ messageId }) => {
-    setMessages((prev) => prev.filter((msg) => msg._id !== messageId));
-  }, []);
-
-  const onConversationUpdated = useCallback((updatedConvo) => {
-    updateChatList(updatedConvo);
-  }, [updateChatList]);
-
+  // --- 1. Setup Effect ---
   useEffect(() => {
     if (!selectedConversationId || !socket) return;
-    
     initialScrollDone.current = false;
     isInitialLoadPhase.current = true;
     setChatOpacity(0);
-
     setTimeout(() => { isInitialLoadPhase.current = false; }, 2000);
 
     socket.emit("joinRoom", selectedConversationId);
+    socket.emit("getOnlineStatus", { userId: selectedConversation.userId._id, model: "User" }); // Check User Status
     socket.emit("markAsRead", { conversationId: selectedConversationId, userId: currentExpert.id });
+    
     setConversations(prev => prev.map(c => c._id === selectedConversationId ? { ...c, expertUnreadCount: 0 } : c));
+    setIsTyping(false);
 
     startMessagesTransition(async () => {
       setMessages([]);
       const history = await getExpertMessages(selectedConversationId);
       setMessages(history);
     });
-    
+  }, [selectedConversationId, currentExpert.id, socket]);
+
+  // --- 2. Events Effect ---
+  useEffect(() => {
+    if (!selectedConversationId || !socket) return;
     socket.on("receiveMessage", onReceiveMessage);
     socket.on("messagesRead", onMessagesRead);
     socket.on("messageDeleted", onMessageDeleted);
     socket.on("conversationUpdated", onConversationUpdated);
-    
+    socket.on("userStatusChanged", onUserStatusChanged);
+    socket.on("typing", onTyping);
+    socket.on("stopTyping", onStopTyping);
     return () => {
       socket.off("receiveMessage", onReceiveMessage);
       socket.off("messagesRead", onMessagesRead);
       socket.off("messageDeleted", onMessageDeleted);
       socket.off("conversationUpdated", onConversationUpdated);
+      socket.off("userStatusChanged", onUserStatusChanged);
+      socket.off("typing", onTyping);
+      socket.off("stopTyping", onStopTyping);
     };
-  }, [selectedConversationId, currentExpert.id, socket, startMessagesTransition, onReceiveMessage, onMessagesRead, onMessageDeleted, onConversationUpdated]);
-  
-  useLayoutEffect(() => {
-    if (messages.length > 0 && messagesContainerRef.current && !isMessagesPending) {
-       const container = messagesContainerRef.current;
-       if (!initialScrollDone.current) {
-         container.scrollTop = container.scrollHeight;
-         initialScrollDone.current = true;
-         setChatOpacity(1);
-       } else {
-         const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
-         if (isNearBottom) {
-            container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
-         }
-       }
-    } else if (messages.length === 0 && !isMessagesPending) {
-        setChatOpacity(1);
-    }
-  }, [messages, isMessagesPending]);
+  }, [selectedConversationId, socket, onReceiveMessage, onMessagesRead, onMessageDeleted, onConversationUpdated, onUserStatusChanged, onTyping, onStopTyping]);
 
-  useEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    const handleScroll = () => {
-      const { scrollTop, scrollHeight, clientHeight } = container;
-      const isNearBottom = scrollHeight - scrollTop - clientHeight < 100;
-      setShowScrollBottomButton(!isNearBottom);
-      
-      const dateHeaders = container.querySelectorAll('[data-date-header]');
-      let currentDate = "";
-      dateHeaders.forEach((header) => {
-        const rect = header.getBoundingClientRect();
-        const containerRect = container.getBoundingClientRect();
-        if (rect.top <= containerRect.top + 60) currentDate = header.getAttribute('data-date-header');
-      });
-      setCurrentStickyDate(currentDate);
-    };
-    container.addEventListener('scroll', handleScroll);
-    return () => container.removeEventListener('scroll', handleScroll);
-  }, [isMessagesPending]);
-
-  const handleImageLoad = useCallback(() => {
-     const container = messagesContainerRef.current;
-     if (!container) return;
-     if (isInitialLoadPhase.current) {
-        container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
-     } else {
-        const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 300;
-        if (isNearBottom) {
-           container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
-        }
-     }
-  }, []);
-
-  useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (emojiPickerRef.current && !emojiPickerRef.current.contains(event.target) &&
-          emojiButtonRef.current && !emojiButtonRef.current.contains(event.target)) {
-        setShowEmojiPicker(false);
-      }
-    };
-    if (showEmojiPicker) {
-      document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
-    }
-  }, [showEmojiPicker]);
-
-  const handleScrollToBottom = () => {
-    if (messagesContainerRef.current) {
-      messagesContainerRef.current.scrollTo({ top: messagesContainerRef.current.scrollHeight, behavior: "auto" });
-    }
-  };
-
-  const handleDeleteMessage = (messageId) => {
-    if (!socket) return;
-    socket.emit("deleteMessage", { conversationId: selectedConversationId, messageId });
-    setMessages((prev) => prev.filter((msg) => msg._id !== messageId));
-    setDeleteConfirmId(null);
-  };
-
-  const handleEmojiSelect = (emoji) => {
-    const input = inputRef.current;
-    if (input) {
-      const start = input.selectionStart;
-      const end = input.selectionEnd;
-      const text = newMessage;
-      const newText = text.substring(0, start) + emoji + text.substring(end);
-      setNewMessage(newText);
-      requestAnimationFrame(() => {
-        input.selectionStart = input.selectionEnd = start + emoji.length;
-        input.focus();
-      });
-    } else {
-      setNewMessage(prev => prev + emoji);
-    }
-  };
-
-  const scrollToMessage = (messageId) => {
-    const messageEl = document.getElementById(`message-${messageId}`);
-    if (messageEl) {
-      messagesContainerRef.current?.scrollTo({ top: messageEl.offsetTop - (messagesContainerRef.current.offsetTop || 0) - 20, behavior: "auto" });
-      messageEl.classList.add("animate-flash");
-      setTimeout(() => messageEl.classList.remove("animate-flash"), 1000);
-    }
-  };
-
-  const formatTime = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  const handleViewMedia = (src, type) => {
-      if (type === 'pdf') {
-          window.open(src, '_blank');
-      } else {
-          setViewingMedia({ src, type });
-      }
-  };
-
+  // ... (Scroll/Image/Emoji handlers - Standard) ...
+  useLayoutEffect(() => { if (messages.length > 0 && messagesContainerRef.current && !isMessagesPending) { const container = messagesContainerRef.current; if (!initialScrollDone.current) { container.scrollTop = container.scrollHeight; initialScrollDone.current = true; setChatOpacity(1); } else { const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150; if (isNearBottom) { container.scrollTo({ top: container.scrollHeight, behavior: "auto" }); } } } else if (messages.length === 0 && !isMessagesPending) { setChatOpacity(1); } }, [messages, isMessagesPending]);
+  useEffect(() => { const container = messagesContainerRef.current; if (!container) return; const handleScroll = () => { const { scrollTop, scrollHeight, clientHeight } = container; const isNearBottom = scrollHeight - scrollTop - clientHeight < 100; setShowScrollBottomButton(!isNearBottom); const dateHeaders = container.querySelectorAll('[data-date-header]'); let currentDate = ""; dateHeaders.forEach((header) => { const rect = header.getBoundingClientRect(); const containerRect = container.getBoundingClientRect(); if (rect.top <= containerRect.top + 60) currentDate = header.getAttribute('data-date-header'); }); setCurrentStickyDate(currentDate); }; container.addEventListener('scroll', handleScroll); return () => container.removeEventListener('scroll', handleScroll); }, [isMessagesPending]);
+  const handleImageLoad = useCallback(() => { const container = messagesContainerRef.current; if (!container) return; if (isInitialLoadPhase.current) { container.scrollTo({ top: container.scrollHeight, behavior: "auto" }); } else { const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 300; if (isNearBottom) { container.scrollTo({ top: container.scrollHeight, behavior: "auto" }); } } }, []);
+  useEffect(() => { const handleClickOutside = (event) => { if (emojiPickerRef.current && !emojiPickerRef.current.contains(event.target) && emojiButtonRef.current && !emojiButtonRef.current.contains(event.target)) { setShowEmojiPicker(false); } }; if (showEmojiPicker) { document.addEventListener('mousedown', handleClickOutside); return () => document.removeEventListener('mousedown', handleClickOutside); } }, [showEmojiPicker]);
+  const handleScrollToBottom = () => { if (messagesContainerRef.current) messagesContainerRef.current.scrollTo({ top: messagesContainerRef.current.scrollHeight, behavior: "auto" }); };
+  const handleEmojiSelect = (emoji) => { const input = inputRef.current; if (input) { const start = input.selectionStart; const end = input.selectionEnd; const text = newMessage; const newText = text.substring(0, start) + emoji + text.substring(end); setNewMessage(newText); requestAnimationFrame(() => { input.selectionStart = input.selectionEnd = start + emoji.length; input.focus(); }); } else { setNewMessage(prev => prev + emoji); } };
+  const scrollToMessage = (messageId) => { const messageEl = document.getElementById(`message-${messageId}`); if (messageEl) { messagesContainerRef.current?.scrollTo({ top: messageEl.offsetTop - (messagesContainerRef.current.offsetTop || 0) - 20, behavior: "auto" }); messageEl.classList.add("animate-flash"); setTimeout(() => messageEl.classList.remove("animate-flash"), 1000); } };
+  const formatTime = (seconds) => { if (isNaN(seconds)) return "0:00"; const mins = Math.floor(seconds / 60); const secs = seconds % 60; return `${mins}:${secs.toString().padStart(2, '0')}`; };
+  const handleViewMedia = (src, type) => { if (type === 'pdf') window.open(src, '_blank'); else setViewingMedia({ src, type }); };
   const filteredEmojis = emojiSearch ? Object.values(EMOJI_CATEGORIES).flat().filter(() => true) : EMOJI_CATEGORIES;
-  
-  const groupedMessages = useMemo(() => {
-    const groups = {};
-    messages.forEach(msg => {
-      const date = formatDateHeader(msg.createdAt);
-      if (!groups[date]) groups[date] = [];
-      groups[date].push(msg);
-    });
-    return groups;
-  }, [messages]);
+  const groupedMessages = useMemo(() => { const groups = {}; messages.forEach(msg => { const date = formatDateHeader(msg.createdAt); if (!groups[date]) groups[date] = []; groups[date].push(msg); }); return groups; }, [messages]);
 
   return (
     <div className="flex h-full bg-background relative">
       <input type="file" ref={fileInputRef} className="hidden" accept="image/*,application/pdf" onChange={handleFileSelect}/>
-      
       {viewingMedia && <MediaViewerModal src={viewingMedia.src} type={viewingMedia.type} onClose={() => setViewingMedia(null)} />}
-
       <div className="w-full max-w-sm flex-col border-r border-border bg-card hidden md:flex">
         <div className="p-4 border-b border-border"><h2 className="text-2xl font-bold text-foreground px-2">Chats</h2></div>
-        <div className="flex-1 overflow-y-auto py-2">
-          {conversations.length > 0 ? (
-            conversations.map((convo) => (
-              <ConversationItem
-                key={convo._id}
-                convo={convo}
-                isSelected={convo._id === selectedConversationId}
-                onClick={() => router.push(`/chat?id=${convo._id}`, { scroll: false })}
-                isMounted={isMounted}
-                currentUserId={currentExpert.id}
-              />
-            ))
-          ) : (
-            <div className="p-8 text-center"><p className="text-muted-foreground">No conversations yet.</p></div>
-          )}
-        </div>
+        <div className="flex-1 overflow-y-auto py-2">{conversations.length > 0 ? (conversations.map((convo) => (<ConversationItem key={convo._id} convo={convo} isSelected={convo._id === selectedConversationId} onClick={() => router.push(`/chat?id=${convo._id}`, { scroll: false })} isMounted={isMounted} currentUserId={currentExpert.id} isTyping={convo.isTyping} />))) : (<div className="p-8 text-center"><p className="text-muted-foreground">No conversations yet.</p></div>)}</div>
       </div>
-
       <div className="flex-1 flex flex-col h-full bg-background relative overflow-hidden">
         {selectedConversation ? (
           <>
             <div className="flex-shrink-0 flex items-center gap-4 px-6 py-4 border-b border-border bg-card shadow-sm z-20">
-              <ProfileImage src={selectedConversation.userId.profilePicture} name={selectedConversation.userId.name} sizeClass="h-12 w-12" />
-              <div className="flex-1"><h3 className="font-semibold text-lg text-foreground">{selectedConversation.userId.name}</h3></div>
-            </div>
-
-            <div 
-                ref={messagesContainerRef} 
-                className="flex-1 overflow-y-auto px-6 py-4 bg-muted/20 relative"
-                style={{ opacity: isMessagesPending ? 1 : chatOpacity }}
-            >
-              {isMessagesPending ? (
-                <div className="flex h-full items-center justify-center"><Loader2Icon className="h-10 w-10 animate-spin text-primary mx-auto mb-4" /><p className="text-muted-foreground">Loading messages...</p></div>
-              ) : (
-                <div className="pb-2">
-                  {Object.entries(groupedMessages).map(([date, msgs]) => (
-                    <div key={date} className="relative mb-6">
-                        <div className="sticky top-2 z-10 flex justify-center my-4 pointer-events-none">
-                           <span className="bg-background/90 backdrop-blur-sm text-foreground px-4 py-1.5 rounded-full text-xs font-medium shadow-md border border-border/50">
-                             {date}
-                           </span>
-                        </div>
-                        <div className="space-y-1">
-                           {msgs.map((msg, index) => {
-                              const prevMsg = msgs[index - 1];
-                              const nextMsg = msgs[index + 1];
-                              const isSender = msg.senderModel === "Expert";
-                              const isFirstInGroup = !prevMsg || prevMsg.senderModel !== msg.senderModel;
-                              const isLastInGroup = !nextMsg || nextMsg.senderModel !== msg.senderModel;
-
-                              return (
-                                <MessageBubble
-                                  key={msg._id}
-                                  message={msg} isSender={isSender} isFirstInGroup={isFirstInGroup} isLastInGroup={isLastInGroup}
-                                  onReplyClick={() => setReplyingTo(msg)} onReplyView={scrollToMessage}
-                                  onDeleteClick={() => setDeleteConfirmId(msg._id)} showDeleteConfirm={deleteConfirmId === msg._id}
-                                  onConfirmDelete={() => handleDeleteMessage(msg._id)} onCancelDelete={() => setDeleteConfirmId(null)}
-                                  isMounted={isMounted} currentUserId={currentExpert.id}
-                                  onViewMedia={handleViewMedia}
-                                  onImageLoad={handleImageLoad}
-                                />
-                              );
-                           })}
-                        </div>
-                    </div>
-                  ))}
+                <ProfileImage src={selectedConversation.userId.profilePicture} name={selectedConversation.userId.name} sizeClass="h-12 w-12" />
+                <div className="flex-1">
+                   <h3 className="font-semibold text-lg text-foreground">{selectedConversation.userId.name}</h3>
+                   <p className="text-sm text-muted-foreground">{isTyping ? <span className="text-primary font-medium animate-pulse">typing...</span> : formatLastSeen(remoteStatus.lastSeen, remoteStatus.isOnline)}</p>
                 </div>
+            </div>
+            <div ref={messagesContainerRef} className="flex-1 overflow-y-auto px-6 py-4 bg-muted/20 relative" style={{ opacity: isMessagesPending ? 1 : chatOpacity }}>
+              {isMessagesPending ? ( <div className="flex h-full items-center justify-center"><Loader2Icon className="h-10 w-10 animate-spin text-primary mx-auto mb-4" /><p className="text-muted-foreground">Loading messages...</p></div> ) : (
+                <div className="pb-2">{Object.entries(groupedMessages).map(([date, msgs]) => (<div key={date} className="relative mb-6"><div className="sticky top-2 z-10 flex justify-center my-4 pointer-events-none"><span className="bg-background/90 backdrop-blur-sm text-foreground px-4 py-1.5 rounded-full text-xs font-medium shadow-md border border-border/50">{date}</span></div><div className="space-y-1">{msgs.map((msg) => { const prevMsg = msgs[msgs.indexOf(msg) - 1]; const nextMsg = msgs[msgs.indexOf(msg) + 1]; const isSender = msg.senderModel === "Expert"; const isFirstInGroup = !prevMsg || prevMsg.senderModel !== msg.senderModel; const isLastInGroup = !nextMsg || nextMsg.senderModel !== msg.senderModel; return (<MessageBubble key={msg._id} message={msg} isSender={isSender} isFirstInGroup={isFirstInGroup} isLastInGroup={isLastInGroup} onReplyClick={() => setReplyingTo(msg)} onReplyView={scrollToMessage} onDeleteClick={() => setDeleteConfirmId(msg._id)} showDeleteConfirm={deleteConfirmId === msg._id} onConfirmDelete={() => handleDeleteMessage(msg._id)} onCancelDelete={() => setDeleteConfirmId(null)} isMounted={isMounted} currentUserId={currentExpert.id} onViewMedia={handleViewMedia} onImageLoad={handleImageLoad} />); })}</div></div>))}</div>
               )}
               <div ref={messagesEndRef} />
             </div>
-
-            {showScrollBottomButton && (
-              <Button size="icon" variant="secondary" className="absolute bottom-24 right-8 h-10 w-10 rounded-full shadow-lg z-30 bg-background border border-border hover:bg-accent animate-in fade-in zoom-in duration-200" onClick={handleScrollToBottom}><ChevronDownIcon className="h-5 w-5 text-muted-foreground" /></Button>
-            )}
-
+            {showScrollBottomButton && <Button size="icon" variant="secondary" className="absolute bottom-24 right-8 h-10 w-10 rounded-full shadow-lg z-30 bg-background border border-border hover:bg-accent animate-in fade-in zoom-in duration-200" onClick={handleScrollToBottom}><ChevronDownIcon className="h-5 w-5 text-muted-foreground" /></Button>}
             <div className="flex-shrink-0 p-4 border-t border-border bg-card z-20">
               {replyingTo && <ReplyPreview message={replyingTo} onCancel={() => setReplyingTo(null)} />}
-              
               {isRecording ? (
-                <div className="flex items-center gap-3 animate-in fade-in duration-200">
-                   <div className="flex-1 bg-background border border-destructive/50 rounded-md px-4 py-2 flex items-center justify-between text-destructive">
-                        <div className="flex items-center gap-2"><div className="h-2 w-2 rounded-full bg-destructive animate-pulse" /><span className="font-mono font-medium">{formatTime(recordingTime)}</span></div><span className="text-xs text-muted-foreground">Recording...</span>
-                   </div>
-                   <Button type="button" size="icon" variant="ghost" onClick={cancelRecording} className="text-muted-foreground hover:text-destructive shrink-0"><TrashIcon className="h-5 w-5" /></Button>
-                   <Button type="button" size="icon" className="bg-primary text-primary-foreground shrink-0 rounded-full h-10 w-10" onClick={stopRecording}><SendIcon className="h-5 w-5" /></Button>
-                </div>
+                <div className="flex items-center gap-3 animate-in fade-in duration-200"><div className="flex-1 bg-background border border-destructive/50 rounded-md px-4 py-2 flex items-center justify-between text-destructive"><div className="flex items-center gap-2"><div className="h-2 w-2 rounded-full bg-destructive animate-pulse" /><span className="font-mono font-medium">{formatTime(recordingTime)}</span></div><span className="text-xs text-muted-foreground">Recording...</span></div><Button type="button" size="icon" variant="ghost" onClick={cancelRecording} className="text-muted-foreground hover:text-destructive shrink-0"><TrashIcon className="h-5 w-5" /></Button><Button type="button" size="icon" className="bg-primary text-primary-foreground shrink-0 rounded-full h-10 w-10" onClick={stopRecording}><SendIcon className="h-5 w-5" /></Button></div>
               ) : (
                 <form onSubmit={handleSendMessage} className="flex gap-2 items-end relative">
                   <div className="flex gap-1">
-                    <div className="relative">
-                      <Button ref={emojiButtonRef} type="button" size="icon" variant="ghost" onMouseDown={(e) => e.preventDefault()} className={cn("text-muted-foreground hover:text-primary hover:bg-accent shrink-0", showEmojiPicker && "bg-accent text-primary")} onClick={() => setShowEmojiPicker(!showEmojiPicker)}><SmileIcon /></Button>
-                      {showEmojiPicker && (
-                        <div ref={emojiPickerRef} className="absolute bottom-full left-0 mb-2 w-80 bg-popover border border-border rounded-lg shadow-lg z-50">
-                          <div className="p-3 border-b border-border flex items-center"><div className="relative flex-1"><SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><Input type="text" placeholder="Search emoji..." value={emojiSearch} onChange={(e) => setEmojiSearch(e.target.value)} className="w-full pl-10 pr-3 py-2 bg-background border-input rounded-md text-sm h-9" onMouseDown={(e) => e.stopPropagation()} /></div></div>
-                          <div className="max-h-80 overflow-y-auto p-2">
-                            {Object.entries(filteredEmojis).map(([category, emojis]) => (<div key={category} className="mb-2"><h4 className="text-xs font-semibold text-muted-foreground mb-2 px-2 uppercase">{category}</h4><div className="grid grid-cols-8 gap-0.5">{emojis.map((emoji, idx) => (<button key={idx} type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => handleEmojiSelect(emoji)} className="flex items-center justify-center w-full h-10 text-2xl hover:bg-accent rounded transition-colors">{emoji}</button>))}</div></div>))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                    <div className="relative"><Button ref={emojiButtonRef} type="button" size="icon" variant="ghost" onMouseDown={(e) => e.preventDefault()} className={cn("text-muted-foreground hover:text-primary hover:bg-accent shrink-0", showEmojiPicker && "bg-accent text-primary")} onClick={() => setShowEmojiPicker(!showEmojiPicker)}><SmileIcon /></Button>{showEmojiPicker && (<div ref={emojiPickerRef} className="absolute bottom-full left-0 mb-2 w-80 bg-popover border border-border rounded-lg shadow-lg z-50"><div className="p-3 border-b border-border flex items-center"><div className="relative flex-1"><SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" /><Input type="text" placeholder="Search emoji..." value={emojiSearch} onChange={(e) => setEmojiSearch(e.target.value)} className="w-full pl-10 pr-3 py-2 bg-background border-input rounded-md text-sm h-9" onMouseDown={(e) => e.stopPropagation()} /></div></div><div className="max-h-80 overflow-y-auto p-2">{Object.entries(filteredEmojis).map(([category, emojis]) => (<div key={category} className="mb-2"><h4 className="text-xs font-semibold text-muted-foreground mb-2 px-2 uppercase">{category}</h4><div className="grid grid-cols-8 gap-0.5">{emojis.map((emoji, idx) => (<button key={idx} type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => handleEmojiSelect(emoji)} className="flex items-center justify-center w-full h-10 text-2xl hover:bg-accent rounded transition-colors">{emoji}</button>))}</div></div>))}</div></div>)}</div>
                     <Button type="button" size="icon" variant="ghost" className="text-muted-foreground hover:text-primary hover:bg-accent shrink-0" onMouseDown={(e) => e.preventDefault()} onClick={() => fileInputRef.current?.click()}><AttachIcon /></Button>
                   </div>
-                  <Input ref={inputRef} value={newMessage} onChange={(e) => setNewMessage(e.target.value)} placeholder="Type a message..." className="flex-1 bg-background border-input resize-none" onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(e); } }} />
-                  {newMessage.trim() ? (
-                     <Button type="submit" size="icon" className="bg-primary hover:bg-primary/90 text-primary-foreground shrink-0" onMouseDown={(e) => e.preventDefault()}><SendIcon className="h-5 w-5" /></Button>
-                  ) : (
-                     <Button type="button" size="icon" className="bg-primary hover:bg-primary/90 text-primary-foreground shrink-0" onClick={startRecording}><MicIcon className="h-5 w-5" /></Button>
-                  )}
+                  <Input ref={inputRef} value={newMessage} onChange={handleTyping} placeholder="Type a message..." className="flex-1 bg-background border-input resize-none" onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(e); } }} />
+                  {newMessage.trim() ? <Button type="submit" size="icon" className="bg-primary hover:bg-primary/90 text-primary-foreground shrink-0" onMouseDown={(e) => e.preventDefault()}><SendIcon className="h-5 w-5" /></Button> : <Button type="button" size="icon" className="bg-primary hover:bg-primary/90 text-primary-foreground shrink-0" onClick={startRecording}><MicIcon className="h-5 w-5" /></Button>}
                 </form>
               )}
             </div>
           </>
         ) : (
-          <div className="flex flex-col h-full items-center justify-center text-muted-foreground p-8 text-center">
-            <div className="max-w-md"><h3 className="text-2xl font-semibold text-foreground mb-2">Welcome to Messages</h3><p className="text-muted-foreground">Select a user from the left to start chatting.</p></div>
-          </div>
+          <div className="flex flex-col h-full items-center justify-center text-muted-foreground p-8 text-center"><div className="max-w-md"><h3 className="text-2xl font-semibold text-foreground mb-2">Welcome to Messages</h3><p className="text-muted-foreground">Select a user from the left to start chatting.</p></div></div>
         )}
       </div>
     </div>
   );
 }
 
-function SmartImage({ src, alt, onClick, onLoad }) {
-    const [displaySrc, setDisplaySrc] = useState(src);
-
-    useEffect(() => {
-        if (src !== displaySrc) {
-            const img = new Image();
-            img.src = src;
-            img.onload = () => {
-                setDisplaySrc(src);
-            };
-        }
-    }, [src, displaySrc]);
-
-    return (
-        <img 
-            src={displaySrc} 
-            alt={alt} 
-            className="max-w-full h-auto object-cover max-h-64"
-            onClick={onClick}
-            onLoad={onLoad} 
-        />
-    );
-}
-
-function MediaViewerModal({ src, type, onClose }) {
-  if (!src) return null;
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/95 backdrop-blur-md animate-in fade-in duration-200" onClick={onClose}>
-      <button onClick={onClose} className="absolute top-4 right-4 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors z-50"><XIcon className="h-6 w-6" /></button>
-      <div className="relative w-full h-full max-w-6xl max-h-[90vh] flex items-center justify-center p-4" onClick={e => e.stopPropagation()}>
-        {type === 'image' && <img src={src} alt="Full view" className="max-w-full max-h-full object-contain rounded-md shadow-2xl" />}
-      </div>
-    </div>
-  );
-}
-
-function ConversationItem({ convo, isSelected, onClick, isMounted, currentUserId }) {
-  const isLastMessageMine = convo.lastMessageSender === currentUserId;
-  const isReadByExpert = convo.userUnreadCount === 0;
-  const isSending = convo.lastMessageStatus === 'sending';
-
-  return (
-    <button onClick={onClick} className={cn("flex w-full items-start gap-4 px-4 py-4 text-left hover:bg-accent/50 transition-all duration-200", isSelected && "bg-accent")}>
-      <ProfileImage src={convo.userId.profilePicture} name={convo.userId.name} sizeClass="h-12 w-12 shrink-0" />
-      <div className="flex-1 overflow-hidden min-w-0">
-        <div className="flex justify-between items-start mb-1 gap-2">
-          <h3 className="font-semibold text-base text-foreground truncate">{convo.userId.name}</h3>
-          <span className="text-xs text-muted-foreground shrink-0 pt-1">{isMounted ? formatLastMessageTime(convo.lastMessageAt) : null}</span>
-        </div>
-        <div className="flex justify-between items-center gap-2">
-          <div className="flex items-center gap-1 overflow-hidden flex-1">
-            {isLastMessageMine && (
-               isSending ? (
-                  <ClockIcon className="h-3 w-3 text-muted-foreground shrink-0" />
-               ) : (
-                  <CheckCheckIcon className={cn("h-4 w-4 shrink-0", isReadByExpert ? "text-blue-500" : "text-muted-foreground")} />
-               )
-            )}
-            <p className="text-sm text-muted-foreground truncate">{convo.lastMessage || "No messages yet"}</p>
-          </div>
-          {convo.expertUnreadCount > 0 && <span className="flex items-center justify-center bg-primary text-primary-foreground text-xs font-bold rounded-full h-5 min-w-[20px] px-1.5 shrink-0">{convo.expertUnreadCount}</span>}
-        </div>
-      </div>
-    </button>
-  );
-}
-
-function VoiceMessagePlayer({ src, isSender }) {
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const audioRef = useRef(null);
-
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    const updateProgress = () => {
-        const current = audio.currentTime;
-        const total = audio.duration;
-        if (Number.isFinite(total) && total > 0) {
-            setProgress((current / total) * 100);
-            setDuration(total);
-        } else {
-            setProgress(0); 
-            setDuration(0);
-        }
-    };
-
-    const setAudioData = () => {
-        const d = audio.duration;
-        if (Number.isFinite(d)) setDuration(d);
-    };
-
-    const handleEnded = () => { setIsPlaying(false); setProgress(0); };
-
-    audio.addEventListener('timeupdate', updateProgress);
-    audio.addEventListener('loadedmetadata', setAudioData);
-    audio.addEventListener('durationchange', setAudioData);
-    audio.addEventListener('ended', handleEnded);
-    
-    return () => {
-      audio.removeEventListener('timeupdate', updateProgress);
-      audio.removeEventListener('loadedmetadata', setAudioData);
-      audio.removeEventListener('durationchange', setAudioData);
-      audio.removeEventListener('ended', handleEnded);
-    };
-  }, []);
-
-  const togglePlay = () => { const audio = audioRef.current; if (!audio) return; if (isPlaying) audio.pause(); else audio.play(); setIsPlaying(!isPlaying); };
-  const handleSeek = (e) => { const audio = audioRef.current; if (!audio) return; const newTime = (e.target.value / 100) * audio.duration; audio.currentTime = newTime; setProgress(e.target.value); };
-  
-  const formatTime = (time) => {
-    if (!Number.isFinite(time) || isNaN(time)) return "0:00";
-    const mins = Math.floor(time / 60);
-    const secs = Math.floor(time % 60);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  return (
-    <div className="flex items-center gap-3 pr-4 min-w-[200px] py-1">
-      <audio ref={audioRef} src={src} className="hidden" />
-      <button onClick={togglePlay} className={cn("flex items-center justify-center h-10 w-10 rounded-full transition-colors shrink-0", isSender ? "bg-primary-foreground/20 hover:bg-primary-foreground/30 text-primary-foreground" : "bg-primary/10 hover:bg-primary/20 text-primary")}>{isPlaying ? <PauseIcon className="h-5 w-5" /> : <PlayIcon className="h-5 w-5 ml-0.5" />}</button>
-      <div className="flex-1 flex flex-col gap-1"><input type="range" min="0" max="100" value={progress || 0} onChange={handleSeek} className={cn("w-full h-1 rounded-lg appearance-none cursor-pointer", isSender ? "bg-primary-foreground/30 accent-primary-foreground" : "bg-muted-foreground/20 accent-primary")} /><div className={cn("flex justify-between text-[10px] font-medium", isSender ? "text-primary-foreground/80" : "text-muted-foreground")}><span>{formatTime(audioRef.current?.currentTime || 0)}</span><span>{formatTime(duration)}</span></div></div>
-    </div>
-  );
-}
-
-function MessageBubble({ message, isSender, isFirstInGroup, isLastInGroup, onReplyClick, onReplyView, onDeleteClick, showDeleteConfirm, onConfirmDelete, onCancelDelete, isMounted, currentUserId, onViewMedia, onImageLoad }) {
-  const [showMenu, setShowMenu] = useState(false);
-  const menuRef = useRef(null);
-  const timestamp = isMounted ? new Date(message.createdAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true }) : null;
-  const canDelete = message.sender === currentUserId || message.senderModel === "Expert";
-  
-  const isSending = message.status === "sending";
-  const isRead = message.readBy && message.readBy.some(id => id !== currentUserId);
-  
-  const isAudio = message.contentType === 'audio' || (typeof message.content === 'string' && message.content.startsWith('data:audio'));
-  const isImage = message.contentType === 'image';
-  const isPdf = message.contentType === 'pdf';
-
-  useEffect(() => { const handleClickOutside = (event) => { if (menuRef.current && !menuRef.current.contains(event.target)) setShowMenu(false); }; if (showMenu) { document.addEventListener('mousedown', handleClickOutside); return () => document.removeEventListener('mousedown', handleClickOutside); } }, [showMenu]);
-  return (
-    <div id={`message-${message._id}`} className={cn("flex w-full group", isFirstInGroup ? "mt-3" : "mt-1")}>
-      <div className={cn("flex w-full", isSender ? "justify-end" : "justify-start")}>
-        <div className={cn("px-4 py-2.5 pb-6 relative shadow-sm max-w-[75%]", isSender ? "bg-primary text-primary-foreground" : "bg-card text-card-foreground border border-border", "rounded-2xl", !isFirstInGroup && isSender && "rounded-tr-md", !isFirstInGroup && !isSender && "rounded-tl-md", !isLastInGroup && isSender && "rounded-br-md", !isLastInGroup && !isSender && "rounded-bl-md")}>
-          {message.replyTo && (
-            <button onClick={() => onReplyView(message.replyTo._id)} className={cn("block p-2.5 rounded-lg mb-2 w-full text-left", "border-l-4", isSender ? "bg-black/10 border-primary-foreground/50" : "bg-muted/50 border-primary")}>
-              <p className={cn("font-semibold text-xs mb-1", isSender ? "text-primary-foreground" : "text-primary")}>{message.replyTo.senderModel === "User" ? "User" : "You"}</p>
-              {message.replyTo.contentType === 'image' ? <div className="flex items-center gap-2 mt-1"><ImageIcon className="h-4 w-4" /> <span className="text-xs opacity-80">Photo</span></div> : message.replyTo.contentType === 'pdf' ? <div className="flex items-center gap-2 mt-1"><FileIcon className="h-4 w-4" /> <span className="text-xs opacity-80">Document</span></div> : <p className={cn("text-sm truncate", isSender ? "text-primary-foreground/80" : "text-muted-foreground")}>{message.replyTo.content}</p>}
-            </button>
-          )}
-          {isAudio ? <VoiceMessagePlayer src={message.content} isSender={isSender} /> : isImage ? <div className="mb-1 rounded-lg overflow-hidden cursor-pointer hover:opacity-90 transition-opacity" onClick={() => onViewMedia(message.content, 'image')}><SmartImage src={message.content} alt="Shared image" onLoad={onImageLoad} /></div> : isPdf ? <a href={message.content} target="_blank" rel="noopener noreferrer" className={cn("flex items-center gap-3 p-3 rounded-lg transition-colors cursor-pointer", isSender ? "bg-primary-foreground/20 hover:bg-primary-foreground/30" : "bg-muted hover:bg-muted/80")}><div className={cn("p-2 rounded-full", isSender ? "bg-primary-foreground/20" : "bg-background")}><FileIcon className="h-5 w-5" /></div><div className="flex-1 overflow-hidden"><p className="text-sm font-medium truncate">Document.pdf</p><p className={cn("text-xs", isSender ? "text-primary-foreground/80" : "text-muted-foreground")}>Tap to view</p></div><DownloadIcon className="h-4 w-4 opacity-70" /></a> : <p className="text-[15px] leading-relaxed break-words whitespace-pre-wrap pr-16">{message.content}</p>}
-          <div className="absolute right-3 bottom-1.5 flex items-center gap-1"><span className={cn("text-[11px]", isSender ? "text-primary-foreground/70" : "text-muted-foreground")}>{timestamp}</span>{isSender && ( isSending ? <ClockIcon className="h-3 w-3 text-primary-foreground/70" /> : <CheckCheckIcon className={cn("h-3.5 w-3.5", isRead ? "text-blue-300" : "text-primary-foreground/70")} /> )}</div>
-          <div className={cn("absolute top-0 flex gap-1 transition-all opacity-0 group-hover:opacity-100", isSender ? "-left-16" : "-right-16")}><Button variant="ghost" size="icon" className="h-8 w-8 rounded-full bg-background border border-border shadow-md hover:bg-accent" onClick={onReplyClick} onMouseDown={(e) => e.preventDefault()}><ReplyIcon className="h-4 w-4 text-foreground" /></Button>{canDelete && (<div className="relative" ref={menuRef}><Button variant="ghost" size="icon" className="h-8 w-8 rounded-full bg-background border border-border shadow-md hover:bg-accent" onClick={() => setShowMenu(!showMenu)} onMouseDown={(e) => e.preventDefault()}><MoreVerticalIcon className="h-4 w-4 text-foreground" /></Button>{showMenu && (<div className="absolute top-full mt-1 right-0 bg-popover border border-border rounded-lg shadow-lg z-50 min-w-[150px]"><button onClick={() => { onDeleteClick(); setShowMenu(false); }} className="w-full px-4 py-2 text-left text-sm hover:bg-accent flex items-center gap-2 text-destructive"><TrashIcon />Delete Message</button></div>)}</div>)}</div>
-          {showDeleteConfirm && (<div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"><div className="bg-card border border-border rounded-lg p-6 max-w-sm mx-4 shadow-xl"><h3 className="text-lg font-semibold mb-2">Delete Message?</h3><p className="text-sm text-muted-foreground mb-4">This message will be deleted for everyone. This action cannot be undone.</p><div className="flex gap-2 justify-end"><Button variant="ghost" onClick={onCancelDelete}>Cancel</Button><Button variant="destructive" onClick={onConfirmDelete}>Delete</Button></div></div></div>)}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ReplyPreview({ message, onCancel }) {
-  const isImage = message.contentType === 'image';
-  const isPdf = message.contentType === 'pdf';
-  const isAudio = message.contentType === 'audio';
-  return (
-    <div className="flex items-center justify-between p-3 mb-3 rounded-lg bg-accent border-l-4 border-primary">
-      <div className="flex-1 overflow-hidden">
-        <p className="font-semibold text-sm text-primary mb-1">Replying to {message.senderModel === "User" ? "User" : "yourself"}</p>
-        {isImage ? <div className="flex items-center gap-2"><ImageIcon className="h-4 w-4 text-muted-foreground" /><span className="text-sm text-muted-foreground">Photo</span></div> : isPdf ? <div className="flex items-center gap-2"><FileIcon className="h-4 w-4 text-muted-foreground" /><span className="text-sm text-muted-foreground">Document</span></div> : isAudio ? <div className="flex items-center gap-2"><MicIcon className="h-4 w-4 text-muted-foreground" /><span className="text-sm text-muted-foreground">Voice Message</span></div> : <p className="text-sm text-muted-foreground truncate">{message.content}</p>}
-      </div>
-      <Button variant="ghost" size="icon" onClick={onCancel} className="ml-2 hover:bg-background shrink-0"><XIcon className="h-5 w-5 text-muted-foreground" /></Button>
-    </div>
-  );
-}
+function SmartImage({ src, alt, onClick, onLoad }) { const [displaySrc, setDisplaySrc] = useState(src); useEffect(() => { if (src !== displaySrc) { const img = new Image(); img.src = src; img.onload = () => { setDisplaySrc(src); }; } }, [src, displaySrc]); return ( <img src={displaySrc} alt={alt} className="max-w-full h-auto object-cover max-h-64" onClick={onClick} onLoad={onLoad} /> ); }
+function MediaViewerModal({ src, type, onClose }) { if (!src) return null; return ( <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/95 backdrop-blur-md animate-in fade-in duration-200" onClick={onClose}> <button onClick={onClose} className="absolute top-4 right-4 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors z-50"><XIcon className="h-6 w-6" /></button> <div className="relative w-full h-full max-w-6xl max-h-[90vh] flex items-center justify-center p-4" onClick={e => e.stopPropagation()}>{type === 'image' && <img src={src} alt="Full view" className="max-w-full max-h-full object-contain rounded-md shadow-2xl" />}</div> </div> ); }
+function ConversationItem({ convo, isSelected, onClick, isMounted, currentUserId, isTyping }) { const isLastMessageMine = convo.lastMessageSender === currentUserId; const isReadByExpert = convo.userUnreadCount === 0; const isSending = convo.lastMessageStatus === 'sending'; return ( <button onClick={onClick} className={cn("flex w-full items-start gap-4 px-4 py-4 text-left hover:bg-accent/50 transition-all duration-200", isSelected && "bg-accent")}> <ProfileImage src={convo.userId.profilePicture} name={convo.userId.name} sizeClass="h-12 w-12 shrink-0" /> <div className="flex-1 overflow-hidden min-w-0"> <div className="flex justify-between items-start mb-1 gap-2"><h3 className="font-semibold text-base text-foreground truncate">{convo.userId.name}</h3><span className="text-xs text-muted-foreground shrink-0 pt-1">{isMounted ? formatLastMessageTime(convo.lastMessageAt) : null}</span></div> <div className="flex justify-between items-center gap-2"><div className="flex items-center gap-1 overflow-hidden flex-1">{isTyping ? <p className="text-sm text-primary font-medium truncate animate-pulse">typing...</p> : <>{isLastMessageMine && ( isSending ? <ClockIcon className="h-3 w-3 text-muted-foreground shrink-0" /> : <CheckCheckIcon className={cn("h-4 w-4 shrink-0", isReadByExpert ? "text-blue-500" : "text-muted-foreground")} /> )}<p className="text-sm text-muted-foreground truncate">{convo.lastMessage || "No messages yet"}</p></>}</div>{convo.expertUnreadCount > 0 && <span className="flex items-center justify-center bg-primary text-primary-foreground text-xs font-bold rounded-full h-5 min-w-[20px] px-1.5 shrink-0">{convo.expertUnreadCount}</span>}</div> </div> </button> ); }
+function VoiceMessagePlayer({ src, isSender }) { const [isPlaying, setIsPlaying] = useState(false); const [progress, setProgress] = useState(0); const [duration, setDuration] = useState(0); const audioRef = useRef(null); useEffect(() => { const audio = audioRef.current; if (!audio) return; const updateProgress = () => { const current = audio.currentTime; const total = audio.duration; if (Number.isFinite(total) && total > 0) { setProgress((current / total) * 100); setDuration(total); } else { setProgress(0); setDuration(0); } }; const setAudioData = () => { const d = audio.duration; if (Number.isFinite(d)) setDuration(d); }; const handleEnded = () => { setIsPlaying(false); setProgress(0); }; audio.addEventListener('timeupdate', updateProgress); audio.addEventListener('loadedmetadata', setAudioData); audio.addEventListener('durationchange', setAudioData); audio.addEventListener('ended', handleEnded); return () => { audio.removeEventListener('timeupdate', updateProgress); audio.removeEventListener('loadedmetadata', setAudioData); audio.removeEventListener('durationchange', setAudioData); audio.removeEventListener('ended', handleEnded); }; }, []); const togglePlay = () => { const audio = audioRef.current; if (!audio) return; if (isPlaying) audio.pause(); else audio.play(); setIsPlaying(!isPlaying); }; const handleSeek = (e) => { const audio = audioRef.current; if (!audio) return; const newTime = (e.target.value / 100) * audio.duration; audio.currentTime = newTime; setProgress(e.target.value); }; const formatTime = (time) => { if (!Number.isFinite(time) || isNaN(time)) return "0:00"; const mins = Math.floor(time / 60); const secs = Math.floor(time % 60); return `${mins}:${secs.toString().padStart(2, '0')}`; }; return ( <div className="flex items-center gap-3 pr-4 min-w-[200px] py-1"> <audio ref={audioRef} src={src} className="hidden" /> <button onClick={togglePlay} className={cn("flex items-center justify-center h-10 w-10 rounded-full transition-colors shrink-0", isSender ? "bg-primary-foreground/20 hover:bg-primary-foreground/30 text-primary-foreground" : "bg-primary/10 hover:bg-primary/20 text-primary")}>{isPlaying ? <PauseIcon className="h-5 w-5" /> : <PlayIcon className="h-5 w-5 ml-0.5" />}</button> <div className="flex-1 flex flex-col gap-1"><input type="range" min="0" max="100" value={progress || 0} onChange={handleSeek} className={cn("w-full h-1 rounded-lg appearance-none cursor-pointer", isSender ? "bg-primary-foreground/30 accent-primary-foreground" : "bg-muted-foreground/20 accent-primary")} /><div className={cn("flex justify-between text-[10px] font-medium", isSender ? "text-primary-foreground/80" : "text-muted-foreground")}><span>{formatTime(audioRef.current?.currentTime || 0)}</span><span>{formatTime(duration)}</span></div></div> </div> ); }
+function MessageBubble({ message, isSender, isFirstInGroup, isLastInGroup, onReplyClick, onReplyView, onDeleteClick, showDeleteConfirm, onConfirmDelete, onCancelDelete, isMounted, currentUserId, onViewMedia, onImageLoad }) { const [showMenu, setShowMenu] = useState(false); const menuRef = useRef(null); const timestamp = isMounted ? new Date(message.createdAt).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true }) : null; const canDelete = message.sender === currentUserId || message.senderModel === "Expert"; const isSending = message.status === "sending"; const isRead = message.readBy && message.readBy.some(id => id !== currentUserId); const isAudio = message.contentType === 'audio' || (typeof message.content === 'string' && message.content.startsWith('data:audio')); const isImage = message.contentType === 'image'; const isPdf = message.contentType === 'pdf'; useEffect(() => { const handleClickOutside = (event) => { if (menuRef.current && !menuRef.current.contains(event.target)) setShowMenu(false); }; if (showMenu) { document.addEventListener('mousedown', handleClickOutside); return () => document.removeEventListener('mousedown', handleClickOutside); } }, [showMenu]); return ( <div id={`message-${message._id}`} className={cn("flex w-full group", isFirstInGroup ? "mt-3" : "mt-1")}> <div className={cn("flex w-full", isSender ? "justify-end" : "justify-start")}> <div className={cn("px-4 py-2.5 pb-6 relative shadow-sm max-w-[75%]", isSender ? "bg-primary text-primary-foreground" : "bg-card text-card-foreground border border-border", "rounded-2xl", !isFirstInGroup && isSender && "rounded-tr-md", !isFirstInGroup && !isSender && "rounded-tl-md", !isLastInGroup && isSender && "rounded-br-md", !isLastInGroup && !isSender && "rounded-bl-md")}> {message.replyTo && ( <button onClick={() => onReplyView(message.replyTo._id)} className={cn("block p-2.5 rounded-lg mb-2 w-full text-left", "border-l-4", isSender ? "bg-black/10 border-primary-foreground/50" : "bg-muted/50 border-primary")}> <p className={cn("font-semibold text-xs mb-1", isSender ? "text-primary-foreground" : "text-primary")}>{message.replyTo.senderModel === "User" ? "User" : "You"}</p> {message.replyTo.contentType === 'image' ? <div className="flex items-center gap-2 mt-1"><ImageIcon className="h-4 w-4" /> <span className="text-xs opacity-80">Photo</span></div> : message.replyTo.contentType === 'pdf' ? <div className="flex items-center gap-2 mt-1"><FileIcon className="h-4 w-4" /> <span className="text-xs opacity-80">Document</span></div> : <p className={cn("text-sm truncate", isSender ? "text-primary-foreground/80" : "text-muted-foreground")}>{message.replyTo.content}</p>} </button> )} {isAudio ? <VoiceMessagePlayer src={message.content} isSender={isSender} /> : isImage ? <div className="mb-1 rounded-lg overflow-hidden cursor-pointer hover:opacity-90 transition-opacity" onClick={() => onViewMedia(message.content, 'image')}><SmartImage src={message.content} alt="Shared image" onLoad={onImageLoad} /></div> : isPdf ? <a href={message.content} target="_blank" rel="noopener noreferrer" className={cn("flex items-center gap-3 p-3 rounded-lg transition-colors cursor-pointer", isSender ? "bg-primary-foreground/20 hover:bg-primary-foreground/30" : "bg-muted hover:bg-muted/80")}><div className={cn("p-2 rounded-full", isSender ? "bg-primary-foreground/20" : "bg-background")}><FileIcon className="h-5 w-5" /></div><div className="flex-1 overflow-hidden"><p className="text-sm font-medium truncate">Document.pdf</p><p className={cn("text-xs", isSender ? "text-primary-foreground/80" : "text-muted-foreground")}>Tap to view</p></div><DownloadIcon className="h-4 w-4 opacity-70" /></a> : <p className="text-[15px] leading-relaxed break-words whitespace-pre-wrap pr-16">{message.content}</p>} <div className="absolute right-3 bottom-1.5 flex items-center gap-1"><span className={cn("text-[11px]", isSender ? "text-primary-foreground/70" : "text-muted-foreground")}>{timestamp}</span>{isSender && ( isSending ? <ClockIcon className="h-3 w-3 text-primary-foreground/70" /> : <CheckCheckIcon className={cn("h-3.5 w-3.5", isRead ? "text-blue-300" : "text-primary-foreground/70")} /> )}</div> <div className={cn("absolute top-0 flex gap-1 transition-all opacity-0 group-hover:opacity-100", isSender ? "-left-16" : "-right-16")}><Button variant="ghost" size="icon" className="h-8 w-8 rounded-full bg-background border border-border shadow-md hover:bg-accent" onClick={onReplyClick} onMouseDown={(e) => e.preventDefault()}><ReplyIcon className="h-4 w-4 text-foreground" /></Button>{canDelete && (<div className="relative" ref={menuRef}><Button variant="ghost" size="icon" className="h-8 w-8 rounded-full bg-background border border-border shadow-md hover:bg-accent" onClick={() => setShowMenu(!showMenu)} onMouseDown={(e) => e.preventDefault()}><MoreVerticalIcon className="h-4 w-4 text-foreground" /></Button>{showMenu && (<div className="absolute top-full mt-1 right-0 bg-popover border border-border rounded-lg shadow-lg z-50 min-w-[150px]"><button onClick={() => { onDeleteClick(); setShowMenu(false); }} className="w-full px-4 py-2 text-left text-sm hover:bg-accent flex items-center gap-2 text-destructive"><TrashIcon />Delete Message</button></div>)}</div>)}</div> {showDeleteConfirm && (<div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"><div className="bg-card border border-border rounded-lg p-6 max-w-sm mx-4 shadow-xl"><h3 className="text-lg font-semibold mb-2">Delete Message?</h3><p className="text-sm text-muted-foreground mb-4">This message will be deleted for everyone. This action cannot be undone.</p><div className="flex gap-2 justify-end"><Button variant="ghost" onClick={onCancelDelete}>Cancel</Button><Button variant="destructive" onClick={onConfirmDelete}>Delete</Button></div></div></div>)} </div> </div> </div> ); }
+function ReplyPreview({ message, onCancel }) { const isImage = message.contentType === 'image'; const isPdf = message.contentType === 'pdf'; const isAudio = message.contentType === 'audio'; return ( <div className="flex items-center justify-between p-3 mb-3 rounded-lg bg-accent border-l-4 border-primary"> <div className="flex-1 overflow-hidden"> <p className="font-semibold text-sm text-primary mb-1">Replying to {message.senderModel === "User" ? "User" : "yourself"}</p> {isImage ? <div className="flex items-center gap-2"><ImageIcon className="h-4 w-4 text-muted-foreground" /><span className="text-sm text-muted-foreground">Photo</span></div> : isPdf ? <div className="flex items-center gap-2"><FileIcon className="h-4 w-4 text-muted-foreground" /><span className="text-sm text-muted-foreground">Document</span></div> : isAudio ? <div className="flex items-center gap-2"><MicIcon className="h-4 w-4 text-muted-foreground" /><span className="text-sm text-muted-foreground">Voice Message</span></div> : <p className="text-sm text-muted-foreground truncate">{message.content}</p>} </div> <Button variant="ghost" size="icon" onClick={onCancel} className="ml-2 hover:bg-background shrink-0"><XIcon className="h-5 w-5 text-muted-foreground" /></Button> </div> ); }
