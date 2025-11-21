@@ -6,7 +6,7 @@
 
 "use client";
 
-import { useState, useEffect, useTransition } from "react";
+import { useState, useEffect, useTransition, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { Label } from "@/components/ui/label";
@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button";
 // SR-DEV: CRITICAL - Import the new expert action
 import { resendExpertOtpAction } from "@/actions/auth-expert";
 
-const OtpPage = () => {
+const OtpContent = () => {
   const [otp, setOtp] = useState("");
   const [error, setError] = useState("");
   const [isPending, startTransition] = useTransition();
@@ -219,5 +219,18 @@ const Loader2Icon = (props) => (
   <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}><path d="M21 12a9 9 0 1 1-6.219-8.56" /></svg>
 );
 
-// SR-DEV: THE FIX - We must default export the component
-export default OtpPage;
+/**
+ * @description Main wrapper for the OTP page.
+ * Wraps the content in Suspense to satisfy Next.js build requirements.
+ */
+export default function OtpPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex h-screen w-full items-center justify-center bg-background">
+        <Loader2Icon className="h-10 w-10 animate-spin text-primary" />
+      </div>
+    }>
+      <OtpContent />
+    </Suspense>
+  );
+}

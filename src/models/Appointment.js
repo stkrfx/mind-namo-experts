@@ -60,6 +60,9 @@ const AppointmentSchema = new mongoose.Schema(
     
     paymentId: { type: String, index: true },
 
+    // SR-DEV: NEW FIELD
+    whiteboardUrl: { type: String, default: null },
+
   },
   {
     timestamps: true,
